@@ -1,0 +1,44 @@
+README
+**************************************************************************************************************************************
+
+		                               SIMPLE MULTI-THREADED WEB SERVER
+                                                      KEYUR JOSHI
+                                                  keyurjos@buffalo.edu
+***************************************************************************************************************************************
+
+1.The program implements a simple multi-threaded web-server and support basic GET/HEAD requests for html/gif files.It also lists the  
+  directories upon a directory request.
+
+2.Usage:./myhttpd [-d] [-h] [-l file] [-p port] [-r dir] [-t time][-n threadnum] [-s sched]
+
+3.The server runs as daemon and supports the following parameters with default values
+	-d = 0(no debugging/damon mode)
+	-l //optional
+	-r . --(pwd)
+	-t = 60 (thread sleep time);
+        -n = 4 (no of execution threads)
+        -p = 8080 (http-alt)
+        -s = FCFS (scheduling)
+        -h Print help & exit
+
+3.The server can be run in debugging mode if needed and information log will be displayed on screen.
+
+4.In order to maintain data consistency and prevent race condions mutex along with a conditional variables have been used to
+  protect critical data.The key sections are the ones where a requested object is loaded into the list (main/listening    
+  thread),sorting of the list in  case of SJF (scheduling thread) and the execution thread.
+
+5.The use of ~name is resolved as rdir/name/myhttpd/index.html 
+  where rdir=root directory specified at startup via -r argument
+  if not the default root directory has been set to (current working directory).
+
+6.Directory requests or erroneous requests are not queued but are served instantly and logged for files this avoid unnecessary storage
+
+
+7.The code has been tested using Ubuntu-12.10 and g++-4.7/4.6.3.Also the code requires libstdc++.so.6.0.18 and -static parameters    
+  while compiling
+  g++ -static -o myhttpd main.cpp network.cpp dir.cpp getpt.cpp -lpthread 
+  It has also been tested on timberlake.Firefox and chrome have been used for complete web page files and images.
+
+8.The time is displayed in the log as  per the project guidelines as localtime followed by GMT offset.
+
+

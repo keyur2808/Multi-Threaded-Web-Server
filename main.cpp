@@ -1,0 +1,551 @@
+#include <sstream>
+#include <ctype.h>
+#include <inttypes.h>
+#include <pthread.h>
+#include "inc.h"
+#include "network.h"
+#include "gtime.h"
+#include "http.h"
+#include "dirchk.h"
+
+
+using namespace std;
+
+int sockfd;
+int i;
+
+long fsize;
+
+char dir[2000];
+char PORT[5];
+
+//Default start-up options
+char *progname;
+char ch;
+char remoteIP[INET6_ADDRSTRLEN];
+int dflg=0;
+int port = 8080;
+char *lfile = NULL;
+char *schedm="FCFS";
+char *rdir=get_current_dir_name();
+int tnum=4;
+int times=60;
+int lflag=0;
+extern char *optarg;
+extern int optind;
+
+
+
+struct sockaddr_in remoteaddr;
+
+pthread_cond_t ewait=PTHREAD_COND_INITIALIZER;
+pthread_mutex_t llock=PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t elock=PTHREAD_MUTEX_INITIALIZER;
+
+
+
+class clist
+{
+public:
+    int sock;
+    bool req;
+    string ext;
+    char path[2000];
+    long fsize;
+    string reqtime;
+    string schedtime;
+    string exectime;
+    string IP;
+} obj;
+
+list <clist> cl;
+list <clist> cl2;
+list<clist>::iterator it;
+
+bool compare(const clist& lhs, const clist& rhs)
+{
+    return lhs.fsize < rhs.fsize;
+}
+
+bool gethd(const clist& lhs, const clist& rhs)
+{
+    return lhs.req < rhs.req;
+}
+
+int tok_req(char *);
+void get_size();
+void process_req(clist);
+int val=2;
+//thread t1(process_req);
+void hprint()
+{
+    cout<<endl;
+    cout<<"Usage:./myhttpd [-d] [-h] [-l file] [-p port] [-r dir] [-t time][-n threadnum] [-s sched]"<<endl;
+    cout<<"d-Debugging mode"<<endl;
+    cout<<"h-Print this usage"<<endl;
+    cout<<"l-Log file"<<endl;
+    cout<<"r-Root directory of server"<<endl;
+    cout<<"t-Request sleep timer(>30 in sec)"<<endl;
+    cout<<"n-Number of threads"<<endl;
+    cout<<"s-Request scheduling(SJF/FCFS)"<<endl;
+    exit(0);
+}
+
+
+
+
+void * exect(void*)
+{
+    sleep(times);
+    while(1)
+    {
+
+        clist obj1;
+        pthread_mutex_lock(&elock);
+        //cout<<"exec"<<endl;
+        if (cl2.empty())
+        {
+            pthread_cond_wait(&ewait,&elock);
+        }
+        if(!cl2.empty())
+        {
+
+            obj1=cl2.front();
+            cl2.pop_front();
+        }
+        //delete obj1;
+        obj1.exectime=string(setm());
+        if (lflag==1)
+
+        {
+            char reqt[5];
+            if (obj1.req==1)strcpy(reqt,"GET");
+            else strcpy(reqt,"HEAD");
+            {
+                ofstream fout;
+                fout.open(lfile,ios::out|ios::app);
+                fout<<obj1.IP<<" ["<<obj1.reqtime<<"] "<<"["<<obj1.exectime<<"] "<<reqt<<" \""<<obj1.path<<"\" "<<200<<" "<<obj1.fsize<<endl;
+                fout<<endl;
+                fout.close();
+            }
+        }
+
+        pthread_mutex_unlock(&elock);
+
+        if ( (obj1.fsize>0) && (strcmp(obj1.path,"")!=0) )
+            process_req(obj1);
+    }
+    return NULL;
+}
+
+
+void * sched(void*)
+{
+    sleep(20);
+    while(1)
+    {
+
+        pthread_mutex_lock(&llock);
+        pthread_mutex_lock(&elock);
+        while (!cl.empty())
+        {
+          cl2.push_back(cl.front());  
+          if(strcasecmp(schedm,"SJF")==0)
+            {
+                cl2.sort(compare);
+                cl2.sort(gethd);
+            }
+            
+            if(!cl.empty())cl.pop_front();
+            pthread_cond_signal(&ewait);
+        }
+        pthread_mutex_unlock(&elock);
+        pthread_mutex_unlock(&llock);
+    }
+    return NULL;
+}
+
+
+
+
+
+int main(int argc,char *argv[])
+{
+    if ((progname = rindex(argv[0], '/')) == NULL)
+        progname = argv[0];
+    else
+        progname++;
+    while ((ch = getopt(argc, argv, "dhl:p:r:t:n:s:")) != -1)
+        switch(ch)
+        {
+        case 'd':
+            dflg++;		/* print address in output */
+            break;
+        case 'h':
+            hprint();
+            break;
+        case 'l':
+            lflag++;
+            lfile = optarg;
+            break;
+        case 'p':
+            port = atoi(optarg);
+            if (port<1025)
+           {
+            fprintf(stderr,"Port > 1024\n");
+            exit(1);
+           }
+            break;
+        case 'r':
+            rdir=optarg;
+            break;
+        case 't':
+            times=atoi(optarg);
+            if (times<1)
+            {
+            fprintf(stderr,"Sleep time should be > 0\n");
+            exit(1); 
+            }
+            break;
+        case 'n':
+            tnum=atoi(optarg);
+            if (tnum<2)
+            {
+            fprintf(stderr,"Threads should be > 1\n");
+            exit(1);
+            }
+            break;
+        case 's':
+            schedm=optarg;
+            if ( (strcasecmp(schedm,"SJF")!=0) && (strcasecmp(schedm,"FCFS")!=0) )
+            {
+            fprintf(stderr,"Improper scheduling\n");
+            exit(1);
+            }
+            break;
+        case '?':
+        default:
+            printf("no arg");
+            exit(0);
+        }
+    argc -= optind;
+    if (argc != 0)
+    {
+        printf("Invalid option");
+        hprint();
+    }
+
+    sock_setup();
+    if (dflg==0)
+    {
+        daemon(2,0);
+        pthread_t sid;
+        int const tno=tnum;
+        pthread_t tid[tno];
+        //Thread create
+        pthread_create(&sid,NULL,&sched,NULL);
+        for  (i=0; i<tnum; i++)
+        {
+            pthread_create(&tid[i],NULL,&exect,NULL);
+        }
+    }
+
+//Start Listening
+    void *buf;
+    while(1)
+    {
+        strcpy(dir,"");
+        strcpy(dir,rdir);
+        addrlen=sizeof remoteIP;
+        sockfd=accept(listen_sd,(sockaddr *)&remoteaddr,&addrlen);
+        if (sockfd == -1)
+        {
+            perror("accept");
+            continue;
+        }
+        obj.sock=sockfd;
+        //while(1){
+
+        buf=malloc(1024);
+        memset(buf,0,sizeof buf);
+        int n=recv(sockfd,buf,1024,0);
+        if (dflg==1)
+        {
+            cout<<"req"<<endl;
+            cout<<"In main thread Request"<<endl;
+            cout<<(char *)buf<<endl;
+        }
+        
+        if (n>0 && ((strcmp((char *)buf,"\r\n")!=0) && (strcmp((char*) buf,"")!=0)))
+        {
+            val=tok_req((char *)buf);
+            if (val==1)
+            {
+                free(buf);
+                close(obj.sock);
+                //pthread_mutex_unlock(&llock);
+                continue;
+            }
+            get_size();
+
+
+        }
+        else
+        {
+            free(buf);
+            close(obj.sock);
+            //pthread_mutex_unlock(&llock);
+            continue;
+        }
+        if (obj.fsize<=0)
+        { 
+            obj.reqtime=string(setm());
+            send(obj.sock,NFND,sizeof NFND,0);
+            //sendtm(obj.sock);
+            send(obj.sock,SERVER,sizeof SERVER,0);
+            send(obj.sock,TEXT,sizeof TEXT,0);
+            send(obj.sock,MSG404,sizeof MSG404,0);
+            if (lflag==1)
+
+            {   
+                if(dflg==0)pthread_mutex_lock(&elock);
+                obj.exectime=string(setm());
+                char reqt[5];
+                if (obj.req==1)strcpy(reqt,"GET");
+                else strcpy(reqt,"HEAD");
+                {
+                    ofstream fout;
+                    fout.open(lfile,ios::out|ios::app);
+                    fout<<obj.IP<<" ["<<obj.reqtime<<"] "<<"["<<obj.exectime<<"] "<<reqt<<" \""<<obj.path<<"\" "<<404<<" "<<obj.fsize<<endl;
+                    fout<<endl;
+                    fout.close();
+                }
+                if(dflg==0)pthread_mutex_unlock(&elock);
+            }
+            close(obj.sock);
+            free(buf);
+            //pthread_mutex_unlock(&llock);
+            continue;
+        }
+        free(buf);
+
+        inet_ntop(remoteaddr.sin_family,(struct sockaddr_in*)&remoteaddr.sin_addr,remoteIP,sizeof remoteIP);
+        obj.IP=string(remoteIP);
+        obj.reqtime=string(setm());
+        if (dflg==0)
+        {
+            pthread_mutex_lock(&llock);
+            cl.push_back(obj);
+            pthread_mutex_unlock(&llock);
+        }
+        if (dflg==1)
+        {
+            cout<<"Request-"<<obj.path<<endl;
+            process_req(obj);
+
+            {
+                obj.exectime=string(setm());
+                char reqt[5];
+                if (obj.req==1)strcpy(reqt,"GET");
+                else strcpy(reqt,"HEAD");
+                cout<<obj.IP<<" ["<<obj.reqtime<<"] "<<"["<<obj.exectime<<"] "<<reqt<<" \""<<obj.path<<"\" "<<200<<" "<<obj.fsize<<endl;
+                cout<<endl;
+            }//Print to stdout/Debug
+        }
+
+
+    }
+    close(sockfd);
+    close(listen_sd);//process_req();
+    return 0;
+}
+
+int tok_req(char *s)
+{
+
+    obj.req=2;
+    char *p1;
+    char *p2;
+    char *p4;
+    char p3[2000];
+    string p;
+    memset(p3,0,2000);
+
+
+    if (strstr(s,"HEAD ")==s)
+    {
+        obj.req=0;
+    }
+
+    if (strstr(s,"GET ")==s)
+    {
+        obj.req=1;
+    }
+
+    if (obj.req==2)
+    {
+        send(obj.sock,BRQ,sizeof BRQ,0);
+        send(obj.sock,SERVER,sizeof SERVER,0);
+        send(obj.sock,TEXT,sizeof TEXT,0);
+        send(obj.sock,MSG400,sizeof MSG400,0);
+        if (lflag==1)
+
+        {
+            if(dflg==0)pthread_mutex_lock(&elock);
+            obj.exectime=string(setm());
+            char reqt[5];
+            if (obj.req==1)strcpy(reqt,"GET");
+            else strcpy(reqt,"HEAD");
+            {
+                ofstream fout;
+                fout.open(lfile,ios::out|ios::app);
+                fout<<obj.IP<<" ["<<obj.reqtime<<"] "<<"["<<obj.exectime<<"] "<<" Bad request "<<" \""<<"Bad request"<<"\" "<<200<<" "<<obj.fsize<<endl;
+                fout<<endl;
+                fout.close();
+            }
+            if(dflg==0)pthread_mutex_unlock(&elock);
+        }
+        close(obj.sock);
+        return 1;
+    }
+
+    if ((p1=strstr(s,"/"))==NULL)return 1;
+
+
+    if ((p2=strstr(p1," "))!=NULL)
+    {
+        memcpy(p3,p1,p2-p1);
+    }
+    else
+    {
+        return 1;
+    }
+//cout<<p3<<endl;
+    if (p3[1]=='~')
+    {
+        p=string(p3);
+        p.erase(1,1);
+        p=(string)rdir+p+"/myhttpd"+"/index.html";//cout<<p<<endl;
+
+        strcpy(obj.path,p.c_str());
+    }
+
+    else
+    {
+        strcpy(obj.path,p3);
+        strcat(dir,obj.path);
+        strcpy(obj.path,dir);
+
+    }
+    //cout<<obj.path<<endl;
+//CHeck for DIR
+    int status=0;
+    char    tmp[3000];
+    ISDIR(&status,obj.path);
+    if (status==1)
+    {
+
+        strcpy (tmp,obj.path);
+        strcat(tmp,"/index.html");
+        ifstream ig;
+        ig.open(tmp);
+        if (ig.fail())
+        {
+            ig.close();
+            char *bu;
+            bu=lst(obj.path,&status);
+            string dr=(string)RSPOK+(string)TXT+"\r\n";
+            send(obj.sock,dr.c_str(),dr.length(),0);
+            send(obj.sock,LIST,sizeof LIST,0);
+            send(obj.sock,bu,status,0);
+            free(bu);
+            return 1;
+        }
+        else
+        {
+            ig.close();
+            strcpy(obj.path,tmp);
+        }
+    }
+    else
+    {
+        strcpy(tmp,obj.path);
+    }
+
+    //Get extension
+    if (strstr(obj.path,".")!=NULL)
+    {
+        p2=strtok(tmp,".");
+        p2=strtok(NULL,".");
+        obj.ext=string(p2);
+    }
+    strcpy(s,"");
+    return 0;
+}
+
+
+void get_size()
+{
+    ifstream h;
+    h.open(obj.path,ios::binary);
+    h.seekg(0,ios::end);
+    obj.fsize=h.tellg();
+    h.close();
+}
+
+void process_req(clist obj)
+{
+    string rsp;
+    string osize;
+    stringstream mystream;
+    mystream << obj.fsize;
+    osize = mystream.str();
+    void *bufer;
+    bufer=malloc(1*(int)obj.fsize);
+    if (obj.req==1)
+    {
+
+        if ( (obj.ext=="html") || (obj.ext=="htm") ||(obj.ext=="txt") ||(obj.ext=="css") )
+        {
+            if(obj.ext=="htm")obj.ext="html";
+            rsp=(string)RSPOK+(string)sendtm()+(string)SERVER+(string)lasc(obj.path)+"Content-Type: text/"+obj.ext+"\n"+"Content-Length: "+osize+"\r\n\r\n";
+            send(obj.sock,rsp.c_str(),rsp.length(),0);
+            ifstream h;
+            h.open(obj.path,ios::binary);
+            h.read((char *)bufer,(int)obj.fsize);
+            send(obj.sock,bufer,(int)obj.fsize,0);
+            h.close();
+            free(bufer);
+        }
+        if ( (obj.ext=="gif") || (obj.ext=="jpeg") || (obj.ext=="jpg") ||(obj.ext=="png"))
+        {
+            ifstream h;
+            h.open(obj.path,ios::binary);
+            h.read((char *)bufer,(int)obj.fsize);
+            rsp=(string)RSPOK+sendtm()+(string)SERVER+lasc(obj.path)+"Content-Type: image/"+obj.ext+"\n"+"Content-Length: "+osize+"\r\n\r\n";
+            send(obj.sock,rsp.c_str(),rsp.length(),0);
+            send(obj.sock,bufer,(int)obj.fsize,0);
+            h.close();
+            free(bufer);
+
+        }
+
+    }
+    if (obj.req==0)
+    {
+
+        if ( (obj.ext=="html") || (obj.ext=="htm") ||(obj.ext=="txt") ||(obj.ext=="css") )
+        {
+            if(obj.ext=="htm")obj.ext="html";
+            rsp=(string)RSPOK+(string)sendtm()+(string)SERVER+(string)lasc(obj.path)+"Content-Type: text/"+obj.ext+"\n"+"Content-Length: "+osize+"\r\n\r\n";
+            send(obj.sock,rsp.c_str(),rsp.length(),0);
+        }
+        if ( (obj.ext=="gif") || (obj.ext=="jpeg") || (obj.ext=="jpg") ||(obj.ext=="png"))
+        {
+            rsp=(string)RSPOK+sendtm()+(string)SERVER+lasc(obj.path)+"Content-Type: image/"+obj.ext+"\n"+"Content-Length: "+osize+"\r\n\r\n";
+            send(obj.sock,rsp.c_str(),rsp.length(),0);
+        }
+    }
+    close(obj.sock);
+}
+
